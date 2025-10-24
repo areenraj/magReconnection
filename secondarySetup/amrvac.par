@@ -80,7 +80,7 @@
  /
 
 &usr_list
-        parb=1d1
+        parb=1.d1
         eta0_pre=5.d-3
         reta_pre=0.048d0
         heta_pre=1.d0

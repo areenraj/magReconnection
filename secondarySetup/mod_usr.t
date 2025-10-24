@@ -108,8 +108,6 @@ contains
         double precision, intent(in)  :: x(ixI^S,1:ndim)
         double precision, intent(inout) :: wB0(ixI^S,1:ndir)
 
-        parb=1.d1
-
         wB0(ixO^S,1)=zero
         wB0(ixO^S,2)=-Busr*dtanh(parb*x(ixO^S,1))
         wB0(ixO^S,3)=Busr/dcosh(parb*x(ixO^S,1))
@@ -121,8 +119,6 @@ contains
         integer, intent(in)           :: ixI^L,ixO^L
         double precision, intent(in)  :: x(ixI^S,1:ndim)
         double precision, intent(inout) :: wJ0(ixI^S,7-2*ndir:ndir)
-
-        parb=1.d1
 
         wJ0(ixO^S,1)=zero
         wJ0(ixO^S,2)=parb*Busr*dtanh(parb*x(ixO^S,1))/dcosh(parb*x(ixO^S,1))
@@ -136,16 +132,6 @@ contains
         double precision, intent(in) :: w(ixI^S,nw), x(ixI^S,1:ndim)
         double precision :: current(ixI^S,7-2*ndir:3), eta(ixI^S)
         double precision :: rad(ixI^S)
-
-        parb=1.d1
-        eta0_pre=5.d-3
-        reta_pre=0.048d0
-        heta_pre=1.d0
-        eta0=5.d-3
-        reta=0.048d0
-        heta=1.d0
-        tar=1.67d0
-        tacc=1.78d0
 
         if (global_time<tar) then
         rad(ixO^S)=dsqrt(x(ixO^S,1)**2+(x(ixO^S,2)-heta_pre)**2)
