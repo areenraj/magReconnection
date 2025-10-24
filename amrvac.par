@@ -1,9 +1,9 @@
 !setup.pl -d=2
  &filelist
-        base_filename='Output/flare_Asymmetric_35G_'
-!       restart_from_file='Output/flare_Asymmetric_35G_0000.dat'
-!       convert=.true.
-!       convert_type='vtuCCmpi'
+        base_filename='reconnection_35G_'
+!        restart_from_file='reconnection_35G_0000.dat'
+!        convert=.true.
+!        convert_type='vtuCCmpi'
 !        autoconvert=.true.
         nwauxio=19
         saveprim=.true.
@@ -111,4 +111,6 @@
         asy_coeff=1.d0
         field_convert=.true.
 	    beam_deposition=.true.
-/
+
+ /
+
