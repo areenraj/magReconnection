@@ -1,0 +1,114 @@
+!setup.pl -d=2
+ &filelist
+        base_filename='Output/flare_Asymmetric_35G_'
+!       restart_from_file='Output/flare_Asymmetric_35G_0000.dat'
+!       convert=.true.
+!       convert_type='vtuCCmpi'
+!        autoconvert=.true.
+        nwauxio=19
+        saveprim=.true.
+!        level_io=6
+ /
+!        Remember to update the number of auxvars if you change the special outputs
+!        nwauxio=19
+
+ &savelist
+        itsave(1,1)=1
+        itsave(1,2)=1
+        dtsave_log=.01284865696087631479d0
+        dtsave_dat=.01284865696087631479d0
+ /
+!        dtsave, ever 1 sec calculated using
+!        echo "1.0 / 77.829146115812961" | bc -l
+!        0.01284865696087631479
+
+ &stoplist
+        time_max=19.27298544131447d0
+/
+!        !time_max example, 160s calculated (rounded up) using
+!        !echo "160.0 / 77.829146115812961" | bc -l
+!        !where the divisor is the unit time printed in the output of a trial run
+!        !2.05578511374021036795
+!        reset_time=.true.
+
+ &methodlist
+        time_stepper='threestep'
+        flux_scheme=20*'hll'
+        limiter= 3*'cada3',17*'vanleer'
+        small_pressure=1.0d-14
+        small_density=1.0d-14
+ /
+!        limiter= 20*'vanleer'
+
+ &boundlist
+        typeboundary_min1 = 8*'periodic'
+        typeboundary_max1 = 8*'periodic'
+        typeboundary_min2 = 8*'periodic'
+        typeboundary_max2 = 8*'periodic'
+ /
+
+ &meshlist
+        refine_criterion=3
+        refine_max_level=6
+        block_nx1=16
+        block_nx2=16
+        domain_nx1=64
+        domain_nx2=64
+        w_refine_weight(1)=0.2d0
+        w_refine_weight(7)=0.4d0
+        w_refine_weight(9)=0.4d0
+        xprobmin1=-0.5d0
+        xprobmax1=0.5d0
+        xprobmin2=0.d0
+        xprobmax2=1.d0
+        max_blocks=20000
+        iprob=3
+ /
+
+ &paramlist
+        typecourant='maxsum'
+        courantpar=0.8d0
+ /
+
+ &mhd_list
+        mhd_thermal_conduction=.true.
+        mhd_radiative_cooling=.false.
+        mhd_gravity=.false.
+        mhd_energy=.true.
+        typedivbfix='lindepowel'
+        boundary_divbfix(3)=.false.
+        B0field=.true.
+        B0field_forcefree=.true.
+        Busr=35.d0
+        He_abundance=0.d0
+        mhd_eta=-0.1d0
+ /
+!       !Change Busr to change background magnetic field strength
+
+ &tc_list
+        tc_perpendicular=.false.
+        tc_saturate=.true.
+        tc_slope_limiter='MC'
+ /
+
+ &usr_list
+        parb=1.d0
+        eta0_pre=5.d-3
+        r_eta_pre=0.024d0
+        h_eta_pre=0.5d0
+        t_imp=1.63177943d0
+        eta0_imp=3.d-2
+        r_eta_imp=0.024d0
+        h_eta_imp=0.5d0
+        t_acc=1.67042541d0
+        alpha_acc=2.d-4
+        h_eta_acc=0.5d0
+        h_s_acc=0.1d0
+        v_c_acc=1.d3
+        eta_max_acc=2.d-1
+        eta_decay_acc=.false.
+        t_decay=10.2789256d0
+        asy_coeff=1.d0
+        field_convert=.true.
+	    beam_deposition=.true.
+/
