@@ -29,7 +29,7 @@ contains
         call mhd_activate()
 
         ! unit of current density
-        unit_currentdensity=unit_magneticfield/unit_length/4.d0/dpi
+        unit_currentdensity=unit_magneticfield*const_c/unit_length/4.d0/dpi
 
         ! unit of electric field
         unit_electricfield=unit_magneticfield*unit_length/(unit_time*const_c)
