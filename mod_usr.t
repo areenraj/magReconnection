@@ -4371,7 +4371,7 @@ contains
     xbmin=xprobmin1
     xbmax=xprobmax1
     xboundmin=-3.d-1
-    xboundmax=3.d=1
+    xboundmax=3.d-1
     yboundmin=0.04
     yboundmax=5.d-1
 
