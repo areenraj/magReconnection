@@ -1,31 +1,135 @@
 module mod_usr
-
-! This is the user file for the reconnection project for the MSc Astro program
-! We will be studying reconnection produced in the plasma using anomalous resistivity
-! and the due to the formation of a current sheet that we specify by setting the eta 
-! and the magnetic field. 
-
-! The code will also include switching on the presence and heating of electrons which 
-! will allow us to see how the reconnection causes particle acceleration.
-
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! This experiment simulates solar flares in 2.5D.
+! The experiment was last developed by Malcolm Keith Druett at KU Leuven, last update 2024-02 (Druett et al. 2023, 2024)
+! It is developed from the work of Ruan et al. (2020), which, in turn was developed from modelling by Yokoyama and Shibata (2001)
+!
+! Reconnection is triggered via the anomalous resistivity model in four phases which are control via the usr_list: 
+! t<t_imp         precusor (_pre): A precusor phase - generally with low resititivty.
+!                                Can create a set of loops before triggering the flare
+! t_imp<t<t_acc   implusive (_imp): Implusive phase - resistivity is increased, triggering reconnection at the chosen location
+! t_acc<t<t_decay acceleration (_acc): The energetic electrons are switched on between these times
+! t_decay<t       decay phase (_decay): The anomalous resistivity is switched off
+! 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! Subroutine list/map
+! * Root "mod_usr routines" are listed below with capitals
+! * Many of these are "pointed to" new names defined with PEARL/Loop Annotation Syntax(LASY) syntax
+! * Only the calls to other user defined routines are listed
+!
+!   USR_INIT
+!     Define coord system, usr routine names, physics module, and units
+!     | -> usr_params_read  reads user parameters to define
+!   USR_SET_PARAMETERS      => INITGLOBALDATA_USR
+!     Sets up HS Equilib model + B-field for flare e-, resistivity params, gravity, ghost zones
+!     | -> inithdstatic  (see above) exteral HS Equilib model
+!        |-> init_refine_bound sets up the refined region for the flare loops
+!     | -> init_Bfield   (see above) sets up the arrays and B-field line locations for accelerated particles
+!   USR_GRAVITY             => GRAVITY
+!     Sets values for gravity in 2D on grid. Calc: in routine getggrav. DOESNT INCLUDE GHOST CELLS.
+!     | -> getggrav  (see above)
+!   USR_INIT_ONE_GRID       => INITONEGRID_USR
+!     Sets up initial atmosphere for experiment
+!     | -> specialset_B0 (if B0field is not true (split b-field))
+!     | -> mhd_to_conserved() (main subroutine, converts w from primitive to conserved vars)
+!   USR_SOURCE              => SPECIAL_SOURCE
+!     Implements energetics of special energy/mom/mass terms defined by user in SPECIAL_GLOBAL
+!     Here: non-local Energy transport: extracted from acceleration site (ohmic heating term)
+!                                       deposited down field-lines via beam method.
+!     | -> getbQ : Unphysical general background heating to simulate atmos layers
+!     |            returns bQgrid which is added to energy e = e + qdt * bQgrid
+!     | -> getcQ : If over beam injection time, calls this to get ohmic heating
+!     |            extracted from accleration site, for fast electrons
+!     |            e = e - qdt * cQgrid
+!     | -> getlQ : If over beam injection time, calls this to get footpoint heating
+!                from the fast electrons on the grid, then adds e = e + qdt * lQgrid
+!   USR_SPECIAL_BC          => SPECIALBOUND_USR
+!     User defined special boundary conditions (applied to y direction only)
+!     | -> mhd_to_conserved() for converting to conserved variables after calculation
+!     | -> specialset_B0 (but doesnt call as B0field is true (split b-field))
+!     | -> mpistop() on error
+!   USR_VAR_FOR_ERREST      => P_FOR_ERREST
+!     Call pressure calc, store in "var", flag if negative values
+!     | -> mhd_get_pthermal (main code routine to calc thermal pressure)
+!   USR_REFINE_GRID         => SPECIAL_REFINE_GRID
+!     Enforce additional refinement or coarsening
+!       max refinement level is enforced on any block that touches the chromosphere (bottom 3 Mm)
+!       refinement elsewhere is set to default to coarsen.
+!       However, then calls get_refine region user procedure for further implementation
+!       later in this experiment the RF region is updated from special_global via calls to update_refine_bound
+!     | -> get_refine_region
+!   USR_PROCESS_GLOBAL      => SPECIAL_GLOBAL
+!     Called at beginning of time steps.
+!     Controls beam electrons, acceleration, beam and background heating, flare B-field info, flare file output.
+!     Doesnt add these terms to the energy equation. That is done via USR_SOURCE => SPECIAL_SOURCE.
+!     | -> special_global
+!        | -> update_refine_bound
+!        | -> get_flare_eflux
+!           |-> update_Bfield   updates B-field positions/strengths before
+!           |   |               the fast electron acceleration and energy deposition.
+!           |   | -> trace_Bfield
+!           |   | -> trace_Bfield
+!           |-> locate_midpoint   locates "tops" of fieldlines to use for electron beam
+!           |                     plasma depth = 0 reference points.
+!           |-> update_heating_table  Creates a table of values for the formula A.12
+!           |                         Ruan 2020 in terms of logarithmic plasma depth 
+!           |                         scale from Nmin to Nmax. Does not include Flux_0 
+!           |                         or B-field strengths which are added for each line:
+!           |-> get_heating_rate   Uses the heating table to calculate the heating rate
+!           |                      in each line section of each field line.
+!           |-> get_Qe             Calculates beam particle heating rate on the grid
+!           |-(if convert)
+!           |   |-> get_spectra   Calculates (UV line emission spectra?)
+!           |   |                 from fast electrons.
+!           |   |-> get_HXR_line   Calculates Hard X-ray emission 
+!           |   |                  from fieldline locations.
+!           |   |-> interp_HXR   Converts fieldline HXR emission to cell grid emission.
+!           |-> split_bfield   handles creation/removal of B-field lines
+!           |                  if their separation is too high/not high enough in the 
+!           |                  region of interest for fast electrons.
+!        | -> get_flare_preflux   Outputs field line file before electrons are switched on
+!   USR_AUX_OUTPUT          => SPECIALVAR_OUTPUT
+!     This subroutine can be used in the "convert" stage of amrvac, 
+!     It saves/adds additional (auxiliary) variables to the standard vtk file output
+!     |-> mhd_get_pthermal              for T
+!     |-> divvector                     for divB and divV
+!     |-> get_normalized_divb           for divB
+!     |-> get_current, cross_product    for j1234, E123
+!     |-> special_eta                   for resistivity eta
+!     |-> getlQ, getcQ, getbQ           for electron heating, electron accel, background heating
+!     |-> getvar_cooling                for radiative cooling "rad"
+!     |-> get_HXR, get_sxr_flare        for HXR and SXR
+!     |-> get_refine_region             for RF
+!   USR_ADD_AUX_NAMES       => SPECIALVARNAMES_OUTPUT 
+!     user-added variable names saved
+!   USR_SET_B0              => SPECIALSET_B0
+!     B-field split into const background (wB0) + perturbation component
+!     Here the time-independent background magnetic field is set
+!   USR_SET_J0              => SPECIALSET_J0
+!     current density is split into const background (wJ0) + perturbation
+!     Here the time-independent background current density is set
+!   USR_SPECIAL_RESISTIVITY => SPECIAL_ETA
+!     Set the "eta" array
+!     Also called from getcQ and specialvar_output
+!   USRSPECIAL_CONVERT
+!     Some user defined routines to calculate output values from the code
+!     Calls these as routines listed after this point
+!
   use mod_mhd
+
   implicit none
-
-
-  !-------------- for Refine Grid --------------------!
-
-  double precision :: heatunit,gzone,SRadius,bQ0,dya
-  integer, parameter :: jmax=20000
-
-
-  !-------------- for non-dimensional units --------------------!
   double precision :: q_e, unit_currentdensity
   double precision :: unit_electricfield
 
-  !-------------- for Electron and Field Tracing --------------------!
+!!!!!!!!!!!!!!!!!!! For Atmosphere !!!!!!!!!!!!!!!!!!!!!!!!!!!
+  double precision, allocatable :: pbc(:),rbc(:)
+  double precision :: usr_grav
+  double precision :: heatunit,gzone,SRadius,bQ0,dya
+  double precision, allocatable :: pa(:),ra(:),ya(:),Ta(:)
+  integer, parameter :: jmax=20000
+
   integer :: numxQ^D,numFL,numLP
   double precision :: xQmin^D,xQmax^D,dxQ^D,dFh
-
   double precision, allocatable :: xQ(:^D&,:),Qe(:^D&)
   double precision, allocatable :: xFLb(:,:),xFRb(:,:)
   double precision, allocatable :: xFL0(:,:),xFR0(:,:)
@@ -49,54 +153,48 @@ module mod_usr
   logical :: opened = .false.
   double precision :: Eplus,Eminus
 
-
+  !-------------- for special refinement -------------------------!
+  double precision :: ybRFmin,ybRFmax,dLRF
+  double precision, allocatable :: xbRFL(:),xbRFR(:),ybRF(:)
+  integer :: numybRF
+  !-------------- for special refinement -------------------------!
+  !
+  !
   !-------------- from parfile &usr_list -------------------------!
   ! CONVERSION
   ! field_convert
   !          true: outputs all field line data (line number ~ 1407, 1562)
   !          used in: specialset_B0 (line number ~3454), specialset_J0 (line number ~3487)
   logical :: field_convert=.false.
-
   ! INITIALISATION
   ! parb: transition distance between bipolar field patches/ current sheet width
   double precision :: parb = 5.d0/3.d0
-
   ! special resistivity
   ! The flare simulation has 4 phases:
   ! (1) gentle precusor, (2) impuslive, (3) particle acceleration, and (4) gentle decay
   ! Time switches t_{phasename} are used to move between these phases
-  ! used in: special_eta (line numbers ~3447), get_heating_rate (line number ~2222) 
-
+  ! used in: special_eta (line numbers ~3447), get_heating_rate (line number ~2222)  
   ! PRECURSOR phase variables
   double precision :: eta0_pre=5.d-3, r_eta_pre=0.24d0, h_eta_pre=5.d0
-
   ! IMPULSIVE phase variables
   double precision :: t_imp=5.98d2/7.7829146115813d1, eta0_imp=3.d-2, r_eta_imp=0.24d0, h_eta_imp=5.d0
-
   ! PARTICLE ACCELERATION phase variables
   double precision :: t_acc=6.0d2/7.7829146115813d1, alpha_acc=2.d-4, h_eta_acc=5.d0, h_s_acc=1.d0, v_c_acc=1.d3, eta_max_acc=2.d-1
   logical :: eta_decay_acc=.false., beam_deposition=.true.
-
   ! DECAY phase variables
   double precision :: t_decay=2.0d3/7.7829146115813d1
-
   ! Coefficient for asymmetric Bfield, Basi = Busr*asy_coeff
   ! Coefficient for where active region, maintan*xmax
   double precision :: asy_coeff=1.0d0, maintan=4.d-1
-  
   logical :: active_region=.false.
   !-------------- from parfile &usr_list -------------------------!
 
-  !-------------- for special refinement -------------------------!
-  double precision :: ybRFmin,ybRFmax,dLRF
-  double precision, allocatable :: xbRFL(:),xbRFR(:),ybRF(:)
-  integer :: numybRF
-  !-------------- for special refinement -------------------------!
 
 contains
 
+
   subroutine usr_init()
-! Purpose:
+    ! Purpose:
     !   Define the coord system, usr routine names, physics module, and units
     !   The standard user routine "named" routines will be called from the main code.
     ! Parameter list:   none, only global parameters
@@ -137,6 +235,7 @@ contains
     ! define "named" routines that will be called by the main code.
     usr_set_parameters      => initglobaldata_usr
     usr_init_one_grid       => initonegrid_usr
+    !usr_special_bc          => specialbound_usr
     usr_aux_output          => specialvar_output
     usr_add_aux_names       => specialvarnames_output 
     usr_set_B0              => specialset_B0
@@ -145,7 +244,10 @@ contains
     usr_var_for_errest      => p_for_errest
     usr_special_convert     => usrspecial_convert
     usr_process_global      => special_global
+    !usr_gravity             => gravity
     usr_source              => special_source
+    usr_refine_grid         => special_refine_grid
+!    usr_internal_bc         => special_boundary_sponge
     usr_set_field_w         => special_field_w
 
     call mhd_activate()
@@ -174,6 +276,7 @@ contains
 !    write(*,*) "end   usr_init",mype
   end subroutine usr_init
 
+
   subroutine usr_params_read(files)
     ! Purpose:  Read usr_list parameters from input parameter file
     !           These define timings and parameters of different resistivity schemes
@@ -199,26 +302,152 @@ contains
 !    write(*,*) "end   usr_params_read",mype
   end subroutine usr_params_read
 
-  subroutine initglobaldata_usr()
 
+  subroutine initglobaldata_usr()
+    ! Purpose:
+    !   Sets up a Hydrostatic Equilib model for calling in usr_init_one_grid
+    !   Sets up B-field parameters and resistivity for fast electron transport
+    !   These tasks are subcontracted out to user defined routines
+    !   Also sets up user gravity, ghost zones,
+    !   dya: defines high-res cell-size in y
+    ! Calls:
+    !   | -> inithdstatic  (see above)
+    !   |  | -> init_refine_bound
+    !   | -> init_Bfield   (see above)
+    ! Called from:
+    !   Main code (Substitute for "usr_set_parameters")
     use mod_global_parameters
 
 !    write(*,*) "begin initglobaldata_usr",mype
-    
     heatunit=unit_pressure/unit_time          ! 3.697693390805347E-003 erg*cm^-3/s
+    usr_grav=-2.74d4*unit_length/unit_velocity**2 ! solar gravity
     bQ0=1.0d-2/heatunit ! background heating power density
     gzone=0.2d0 ! thickness of a ghostzone below the bottom boundary
     dya=(2.d0*gzone+xprobmax2-xprobmin2)/dble(jmax) ! cells size of high-resolution 1D solar atmosphere
     Busr=Busr/unit_magneticfield ! magnetic field strength at the bottom
     SRadius=69.61d0 ! Solar radius
-    
+    ! hydrostatic vertical stratification of density, temperature, pressure
+    call inithdstatic
     ! for fast electron heating
     call init_Bfield()
+!    write(*,*) "end   initglobaldata_usr",mype
+  end subroutine initglobaldata_usr
+
+
+  subroutine inithdstatic
+    ! Purpose:
+    !   Sets up a Hydrostatic Equilib model for calling in usr_init_one_grid
+    !   Based on val-c atmosphere 0Mm up to 2.543 Mm
+    !   Based on hydrostatic equilibrium above this
+    !   (for my future experiments, we can base on hydrostatic equilbirium below too!)
+    ! Calls:
+    !   | -> init_refine_bound
+    ! Called from:
+    !   Main code (Substitute for "usr_set_parameters")
+    use mod_global_parameters
+  !! initialize the table in a vertical line through the global domain
+    use mod_global_parameters
+
+    integer :: j,na,nb,ibc
+    double precision, allocatable :: gg(:)
+    double precision:: rpho,Ttop,Tpho,wtra,res,rhob,pb,htra,Ttr,Fc,invT,kappa
+
+    integer :: n_val=49, i
+    double precision :: h_val(49),t_val(49)
+
+    double precision :: ai(49),bi(49),ci(49),di(49)
+    double precision :: hi
+
+    !rpho=0.71d15/unit_numberdensity ! number density at the bottom relaxla
+    rpho=0.9d15/unit_numberdensity ! number density at the bottom relaxla
+    Tpho=1.d4/unit_temperature ! temperature of chromosphere
+    Ttop=2.d6/unit_temperature ! estimated temperature in the top
+    htra=0.2543d0 ! height of initial transition region
+    wtra=0.01d0 ! width of initial transition region 
+    !Ttr=1.d5/unit_temperature ! lowest temperature of upper profile
+    Ttr=4.47d5/unit_temperature ! lowest temperature of upper profile
+    Fc=6*2.d5/heatunit/unit_length ! constant thermal conduction flux
+    kappa=8.d-7*unit_temperature**3.5d0/unit_length/unit_density/unit_velocity**3
+
+   !VAL-C
+    data    h_val   / 0., 50, 100, 150, 250, &
+                      350, 450, 515, 555, 605, &
+                      655, 705, 755, 855, 905, &
+                      980, 1065, 1180, 1280, 1380, &
+                      1515, 1605, 1785, 1925, 1990, &
+                      2016, 2050, 2070, 2080, 2090, &
+                      2104, 2107, 2109, 2113, 2115, &
+                      2120, 2129, 2160, 2200, 2230, &
+                      2255, 2263, 2267, 2271, 2274, &
+                      2280, 2290, 2298, 2543 /
+
+    data    t_val   / 6420, 5840, 5455, 5180, 4780, &
+                      4465, 4220, 4170, 4230, 4420, &
+                      4730, 5030, 5280, 5650, 5755, &
+                      5925, 6040, 6150, 6220, 6280, &
+                      6370, 6440, 6630, 6940, 7160, &
+                      7360, 7660, 7940, 8180, 8440, &
+                      9500, 10700, 12300, 18500, 21000, &
+                      22500, 23000, 23500, 24000, 24200, &
+                      24500, 25500, 28000, 32000, 37000, &
+                      50000, 89100, 141000, 447000 /
+
+!    write(*,*) "begin inithdstatic",mype
+    h_val(1:n_val)=h_val(1:n_val)/1.d4
+    t_val(1:n_val)=t_val(1:n_val)/1.d6
+
+    allocate(ya(jmax),Ta(jmax),gg(jmax),pa(jmax),ra(jmax))
+
+    do j=1,jmax
+      ya(j)=(dble(j)-0.5d0)*dya-gzone
+      if(ya(j)>=htra) then
+        Ta(j)=(3.5d0*Fc/kappa*(ya(j)-htra)+Ttr**3.5d0)**(2.d0/7.d0)
+      else
+        do i=1,n_val
+          if (ya(j)<h_val(i+1)) then
+            Ta(j)=t_val(i)+(ya(j)-h_val(i))*(t_val(i+1)-t_val(i))/(h_val(i+1)-h_val(i))
+            exit
+          endif
+        enddo
+      endif
+      gg(j)=usr_grav*(SRadius/(SRadius+ya(j)))**2
+    enddo
+
+    !! solution of hydrostatic equation 
+    nb=int(gzone/dya)
+    ra(1)=rpho
+    pa(1)=rpho*Ta(1)
+    invT=gg(1)/Ta(1)
+    invT=0.d0
+    do j=2,jmax
+       invT=invT+(gg(j)/Ta(j)+gg(j-1)/Ta(j-1))*0.5d0
+       pa(j)=pa(1)*dexp(invT*dya)
+       ra(j)=pa(j)/Ta(j)
+    end do
+    !! initialized rho and p in the fixed bottom boundary
+    na=floor(gzone/dya+0.5d0)
+    res=gzone-(dble(na)-0.5d0)*dya
+    rhob=ra(na)+res/dya*(ra(na+1)-ra(na))
+    pb=pa(na)+res/dya*(pa(na+1)-pa(na))
+    allocate(rbc(nghostcells))
+    allocate(pbc(nghostcells))
+    do ibc=nghostcells,1,-1
+      na=floor((gzone-dx(2,refine_max_level)*(dble(nghostcells-ibc+1)-0.5d0))/dya+0.5d0)
+      res=gzone-dx(2,refine_max_level)*(dble(nghostcells-ibc+1)-0.5d0)-(dble(na)-0.5d0)*dya
+      rbc(ibc)=ra(na)+res/dya*(ra(na+1)-ra(na))
+      pbc(ibc)=pa(na)+res/dya*(pa(na+1)-pa(na))
+    end do
+
+    if (mype==0) then
+     print*,'minra',minval(ra)
+     print*,'rhob',rhob
+     print*,'pb',pb
+    endif
 
     call init_refine_bound()
 
-!    write(*,*) "end   initglobaldata_usr",mype
-  end subroutine initglobaldata_usr
+!    write(*,*) "end   inithdstatic",mype
+  end subroutine inithdstatic
 
 
   subroutine init_refine_bound()
@@ -268,8 +497,12 @@ contains
     double precision :: lengthFL
 
 !    write(*,*) "begin init_Bfield",mype
-
     tar=0.4d0    ! Time for switching on electrons, t+31.2s in SI units
+    !tar=1.0d1/7.7829146115813d1    ! Time for switching on electrons, denominator=unit time
+    !eta1=1.d-1
+    !vc=1.d3
+    !eta2=1.d-3
+    !etam=1.d0
     eta1=5.d-2   ! eta_0 in eq 10, Ruan 2020
     eta3=1.d-2   ! What is this? not used!
     vc=1.d3      ! v_c threshold speed for resistivity in eq 11, Ruan 2020
@@ -283,10 +516,10 @@ contains
     dt_update_Qe=max(dFh/vmax,dt)
 
     ! table for interpolation
-    xQmin1= 0.8d0 * xprobmin1    ! B-zone: region where B-field lines are tracked (left)
-    xQmax1= 0.8d0 * xprobmax1    ! B-zone: region where B-field lines are tracked (right)
-    xQmin2= 0.95d0 * xprobmin2   ! B-zone: region where B-field lines are tracked (bottom)
-    xQmax2= 0.95d0 * xprobmax2   ! B-zone: region where B-field lines are tracked (top, 9.5Mm)
+    xQmin1=-0.4d0                 ! B-zone: region where B-field lines are tracked (left)
+    xQmax1=0.4d0                  ! B-zone: region where B-field lines are tracked (right)
+    xQmin2=0.d0                  ! B-zone: region where B-field lines are tracked (bottom)
+    xQmax2=0.95d0                 ! B-zone: region where B-field lines are tracked (top, 9.5Mm)
     dxQ1=dFh                     ! dx : copied from max refinement dy
     dxQ2=dFh                     ! dy : copied from max refinement dy
     numXQ1=floor((xQmax1-0.d0)/dxQ1)*2  ! number of fieldline sections initially tracked in x (initialised)
@@ -296,7 +529,7 @@ contains
     lengthFL=(xprobmax2-xprobmin2)*2.d0 ! lengthFL : max length of field-line + twice experiment size in y
     numLP=floor(lengthFL/(dFh))         ! numLP:     max number of fieldline pieces
     !numFL=numXQ1                        ! numFL:     max numb of lines tracked (array size), init: numb x steps at max ref in B-zone
-    numFL=500
+    numFL=100
 
     allocate(xFLb(numFL,ndim),xFRb(numFL,ndim))          ! xFLb, xFRb: location of field line base (left/right)
     allocate(xQ(numXQ1,numXQ2,ndim),Qe(numXQ1,numXQ2))   ! xQ, Qe : coords of field lines, energy into accel
@@ -351,6 +584,59 @@ contains
 !    write(*,*) "end   init_Bfield",mype
   end subroutine init_Bfield
 
+
+  subroutine gravity(ixI^L,ixO^L,wCT,x,gravity_field)
+    ! Purpose:
+    !   Sets up values for gravity in 2D on grid cell centres
+    !   returns them in gravity_field(ix indicies, 2 (x-y-vals)
+    !   Calculation subcontracted out to user defined routine getggrav
+    ! Parameter list
+    !   ixi^l: limits (min max) of inner cell indices (no ghost cells)
+    !   ixo^l: limits (min max) of outer cell indices (inc ghost cells)
+    !   wCT:   Hmm, some kind of variable values... why CT?
+    !   x:     Cell coords
+    !   gravity_field: output, values of gravity at gridcell cell centres
+    !                  DOESNT INCLUDE GHOST CELLS
+    ! Calls:
+    !   | -> getggrav  (see above)
+    ! Called from:
+    !   Main code (Substitute for "usr_gravity")
+    use mod_global_parameters
+    integer, intent(in)             :: ixI^L, ixO^L
+    double precision, intent(in)    :: x(ixI^S,1:ndim)
+    double precision, intent(in)    :: wCT(ixI^S,1:nw)
+    double precision, intent(out)   :: gravity_field(ixI^S,ndim)
+    double precision                :: ggrid(ixI^S)
+!    write(*,*) "begin gravity",mype
+
+    gravity_field=0.d0
+    call getggrav(ggrid,ixI^L,ixO^L,x)
+    gravity_field(ixO^S,2)=ggrid(ixO^S)
+!    write(*,*) "end   gravity",mype
+  end subroutine gravity
+
+
+  subroutine getggrav(ggrid,ixI^L,ixO^L,x)
+    ! Purpose:
+    !   Provides gravity values for cell indicies back through GGRID
+    !   Calculates using usr_grav value defined at photosphere, and
+    !   quadratic decrease with dist from solar centre, 1D code.
+    ! Parameter list
+    !   ggrid: 1D array of gravitational values for cells in y-direction
+    !   ixi^l: limits (min max) of input cell indices (no ghost cells)
+    !   ixo^l: limits (min max) of output cell indices (inc ghost cells)
+    !   x:     Cell coords
+    ! Calls:         none
+    ! Called from:   gravity
+    use mod_global_parameters
+    integer, intent(in)             :: ixI^L, ixO^L
+    double precision, intent(in)    :: x(ixI^S,1:ndim)
+    double precision, intent(out)   :: ggrid(ixI^S)
+
+    ggrid(ixO^S)=usr_grav*(SRadius/(SRadius+x(ixO^S,2)))**2
+  end subroutine
+
+
   subroutine initonegrid_usr(ixI^L,ixO^L,w,x)
     ! Purpose:
     !   Sets up initial atmosphere for experiment
@@ -373,28 +659,31 @@ contains
     double precision, intent(inout) :: w(ixI^S,1:nw)
     double precision :: rhoConst, tempConst
 
-    double precision :: Bf(ixI^S,1:ndir)
-    integer :: ix^D
+    double precision :: res,Bf(ixI^S,1:ndir)
+    integer :: ix^D,na
     logical, save :: first=.true.
 
 !    write(*,*) "begin initonegrid_usr",mype
+
+    rhoConst=4.d15/unit_numberdensity 
+    tempConst=2.d6/unit_temperature 
+
     if(first)then
       if(mype==0) then
         write(*,*)'Simulating 2.5D solar atmosphere'
       endif
       first=.false.
     endif
-
-    rhoConst = 0.9d15/unit_numberdensity
-    tempConst = 4.47d5/unit_temperature
-
+    ! interpolate from "inithdstatic" model (hydrostatic+val-c) onto the grid values
+    ! use this to define denisty rho_, and pressure, p_ in variable array w
     {do ix^DB=ixOmin^DB,ixOmax^DB\}
-      w(ix^D,rho_)= rhoConst
-      w(ix^D,p_)  = rhoConst * tempConst
+        na=floor((x(ix^D,2)-xprobmin2+gzone)/dya+0.5d0)
+        res=x(ix^D,2)-xprobmin2+gzone-(dble(na)-0.5d0)*dya
+        w(ix^D,rho_)=rhoConst
+        w(ix^D,p_)  =rhoConst*tempConst
     {end do\}
-
     w(ixO^S,mom(:))=zero
-    
+    ! splitting b-field or not? (i.e. into main + perturbation part.)
     ! if split B0field is true and the perturbation is set to zero
     if(B0field) then
       w(ixO^S,mag(:))=0.d0
@@ -402,15 +691,12 @@ contains
       call specialset_B0(ixI^L,ixO^L,x,Bf)
       w(ixO^S,mag(1:ndir))=Bf(ixO^S,1:ndir)
     endif
-
     if(mhd_glm) w(ixO^S,psi_)=0.d0
     call mhd_to_conserved(ixI^L,ixO^L,w,x)
 
 !    write(*,*) "end   initonegrid_usr",mype
   end subroutine initonegrid_usr
 
-
-!-------------- for special source terms in energy equation --------------------!
 
   subroutine special_source(qdt,ixI^L,ixO^L,iw^LIM,qtC,wCT,qt,w,x)
     ! Purpose:
@@ -451,21 +737,9 @@ contains
     double precision :: lQgrid(ixI^S),bQgrid(ixI^S),cQgrid(ixI^S)
 
 !    write(*,*) "begin special_source",mype
-
-    
-!-------------- Background Heating --------------------! 
-
-! We have the background heating term to oppose the radiative cooling
-! Radiative Cooling is the property of coronal plasmas. We have disable it
-! as we need not have anything to do with solar plasma. So we are commenting
-! out the background heating.
-
-!   add global background heating bQ
-!   call getbQ(bQgrid,ixI^L,ixO^L,qtC,wCT,x)
-!   w(ixO^S,e_)=w(ixO^S,e_)+qdt*bQgrid(ixO^S)
-
-!-------------- Background Heating --------------------!  
-
+    ! add global background heating bQ
+    call getbQ(bQgrid,ixI^L,ixO^L,qtC,wCT,x)
+    w(ixO^S,e_)=w(ixO^S,e_)+qdt*bQgrid(ixO^S)
 
     !! add localized external heating lQ concentrated at feet of loops
     if(iprob >= 3)then
@@ -591,8 +865,8 @@ contains
     !bQgrid=0.d0   
     {do ix^DB=ixOmin^DB,ixOmax^DB\}
       if (x(ix^D,2)>0.0) then
-        bQgrid(ix^D)=bQ0*(abs(x(ix^D,2)-0.1)/0.5)**(-2.7)
-        bQgrid(ix^D)=bQgrid(ix^D)/(exp(0.3/(x(ix^D,2)-0.201))-1.0)
+        bQgrid(ix^D)=bQ0*(abs(x(ix^D,2)-0.01)/0.05)**(-2.7)
+        bQgrid(ix^D)=bQgrid(ix^D)/(exp(0.03/(x(ix^D,2)-0.0201))-1.0)
         if (bQgrid(ix^D)<0.0) bQgrid(ix^D)=0.0
       endif
     {end do\}
@@ -661,6 +935,202 @@ contains
 !    write(*,*) "end   getlQ",mype
   end subroutine getlQ
 
+
+  subroutine specialbound_usr(qt,ixI^L,ixO^L,iB,w,x)
+    ! special boundary types, user defined
+    ! Purpose:
+    !   User defined special boundary conditions
+    !     Original param files gives values below,
+    !     but MKD switched the sides to open to avoid shock reflection at boundary
+    !     Boundary rho    momx   momy   momz   energy magx   magy   magz
+    !     min1 (x) symm   asymm  symm   asymm  symm   asymm  symm   asymm
+    !     max1 (x) symm   asymm  symm   asymm  symm   asymm  symm   asymm
+    !     min2 (y) special-----------------------------------------------
+    !              Photosphere
+    !              rho:       intial
+    !              mom->v:    antisymm condition
+    !              e->p:      initial pressure
+    !              mag:       initial (i.e. mag=0, B0=intial)
+    !     max2 (y) special-----------------------------------------------
+    !              corona
+    !              rho:       same as last vertical cell value
+    !              mom:       same as last vertical cell value
+    !              e->T:      rho/p of last cell (dT/dy=0), thresholded back if over 5MK
+    !              e->P:      const if T<5mk, otherwise thresholded back to 0 in 2 ghost cells
+    !              mag1:      antisymmetric Bx (to impose field aligned heat flux perp to boundary)
+    !              mag2 mag3: symmetric By and Bz
+    ! Parameter list
+    !   ixi^l: limits (min max) of inner cell indices (no ghost cells)
+    !   ixo^l: limits (min max) of outer cell indices (includes ghost cells)
+    !   NOTE
+    !   ixA coordinates are introduced to handle ghost cells specifically in old code
+    !   NOW:
+    !   ixi^l: limits (min max) of inner cell indices (only ghost cells)... depending on the case we are in!
+    !   ixo^l: limits (min max) of outer cell indices (includes all cells)
+    !   qt :   experiment time
+    !   iB:    Boundary index iB=[1,2,3,4]->[min1,max1,min2,max2]
+    !   w:     variable values
+    !   x:     Cell coords
+    ! Calls: None
+    !   | -> mhd_to_conserved() for converting to conserved variables after calculation
+    !   | -> mpistop() on error
+    ! Called from:
+    !   main code, replacement for usr_special_bc
+    use mod_global_parameters
+
+    integer, intent(in) :: ixO^L, iB, ixI^L ! indices outer, boundary index, indices inner
+    double precision, intent(in) :: qt, x(ixI^S,1:ndim) ! time, coords
+    double precision, intent(inout) :: w(ixI^S,1:nw) ! variables
+
+    double precision :: pth(ixI^S),tmp(ixI^S),ggrid(ixI^S),Te(ixI^S) ! gas pressure, temp, gravity, kinetic Temp
+    double precision :: delydelx, Bf(ixI^S,1:ndir) ! hmm, a gradient?, Bf stores field values called from specialset_B0
+    double precision :: dpdh,dh,dp,Tu ! pressure/height grad, height and pressure steps, kinetic temp in coronal (upper) ghost zone
+    integer :: ix^D,idir,ixInt^L,ixIntB^L ! cell indices int loop ix1 and ix2, idir=loop for dimensions, B boundary limit var names
+    integer :: ixA^L ! cell indices for ghost cells
+
+!    write(*,*) "begin specialbound_usr",mype
+    select case(iB)
+    case(1)
+      ! Here is the magic for transferring to ghost cell references... I guess in old code style from looking at case(3)
+      ! first line creates copies of cell limits over whole span of processor block
+      ! second line over-writes ixAmin and ixAmax to the ghost cell references
+      ! then the ixA values are handed to the processors
+      !
+      ! actually seems to load in the wrong coordinates! (seems to be for ib=2)
+      ixA^L=ixO^L;
+      ixAmin1=ixOmax1+1;ixAmax1=ixOmax1+nghostcells;
+
+      ! copy pressure from ghost cell regions to pth
+      call mhd_get_pthermal(w,x,ixI^L,ixA^L,pth)
+      !w(ixO^S,rho_)=w(ixOmax1+nghostcells:ixOmax1+1:-1,ixOmin2:ixOmax2,rho_)
+      !w(ixO^S,p_)=pth(ixOmax1+nghostcells:ixOmax1+1:-1,ixOmin2:ixOmax2)
+
+      ! create copy of all velocities into "momentum" array of w
+      ! Nonsense BC that overwrite the whole internal domain with the the boundary cell values in v
+      do ix1=ixOmin1,ixOmax1
+        w(ix1^%1ixO^S,mom(1))=w(ixOmax1+1^%1ixO^S,mom(1))/w(ixOmax1+1^%1ixO^S,rho_)
+        w(ix1^%1ixO^S,mom(2))=w(ixOmax1+1^%1ixO^S,mom(2))/w(ixOmax1+1^%1ixO^S,rho_)
+        w(ix1^%1ixO^S,mom(3))=w(ixOmax1+1^%1ixO^S,mom(3))/w(ixOmax1+1^%1ixO^S,rho_)
+        w(ix1^%1ixO^S,rho_)=w(ixOmax1+1^%1ixO^S,rho_)
+        w(ix1^%1ixO^S,p_)=pth(ixOmax1+1^%1ixO^S)
+      enddo
+      ! Nonsense BC that overwrites the whole internal domain with ((-next+3nextnext)/4 in x dir) for  B
+      do ix1=ixOmax1,ixOmin1,-1
+        w(ix1,ixOmin2:ixOmax2,mag(:))=(1.0d0/3.0d0)* &
+                   (-w(ix1+2,ixOmin2:ixOmax2,mag(:)) &
+              +4.0d0*w(ix1+1,ixOmin2:ixOmax2,mag(:)))
+      enddo
+      call mhd_to_conserved(ixI^L,ixO^L,w,x)
+    case(2)
+      ! replacement coords for BCs ixA, again seems to be for iB=1 instead
+      ! not used, same general nonsense as iB=1 case
+      ixA^L=ixO^L;
+      ixAmin1=ixOmin1-nghostcells;ixAmax1=ixOmin1-1;
+      call mhd_get_pthermal(w,x,ixI^L,ixA^L,pth)
+      do ix1=ixOmin1,ixOmax1
+        w(ix1^%1ixO^S,mom(1))=w(ixOmin1-1^%1ixO^S,mom(1))/w(ixOmin1-1^%1ixO^S,rho_)
+        w(ix1^%1ixO^S,mom(2))=w(ixOmin1-1^%1ixO^S,mom(2))/w(ixOmin1-1^%1ixO^S,rho_)
+        w(ix1^%1ixO^S,mom(3))=w(ixOmin1-1^%1ixO^S,mom(3))/w(ixOmin1-1^%1ixO^S,rho_)
+        w(ix1^%1ixO^S,rho_)=w(ixOmin1-1^%1ixO^S,rho_)
+        w(ix1^%1ixO^S,p_)=pth(ixOmin1-1^%1ixO^S)
+      enddo
+      do ix1=ixOmin1,ixOmax1
+        w(ix1,ixOmin2:ixOmax2,mag(:))=(1.0d0/3.0d0)* &
+                   (-w(ix1-2,ixOmin2:ixOmax2,mag(:)) &
+              +4.0d0*w(ix1-1,ixOmin2:ixOmax2,mag(:)))
+      enddo
+      call mhd_to_conserved(ixI^L,ixO^L,w,x)
+    case(3)
+      ! Case 3: Photospheric boundary
+      !---------------------------------------------------------------------------------------------
+      ! fixed zero velocity (Wenzhi, what did you mean by this? isnt it a standard anti-symmetric?)
+      ! 
+      ! The loop below wouldnt work if things were normal here:
+      ! in the second array index  we go from ixomin2:ixomax2 by expanding the w(ixo^s...)
+      ! so normally this would be the whole domain.
+      ! However, the right side in the second index is from ixOmax2+nghostcells:ixOmax2+1:-1
+      ! So a span of nghostcells, stepping backwards.
+      !---------------------------------------------------------------------------------------------
+      ! Set v(ghostcells)=-v(edge of domain) antisymm reflecting boundary.
+      ! Looks like top of domain (coronal boundary), but actually photospheric.
+      ! Remember the "ixomax2" here is the last ghost cell below the std domain
+      do idir=1,ndir
+        w(ixO^S,mom(idir))=-w(ixOmin1:ixOmax1,ixOmax2+nghostcells:ixOmax2+1:-1,mom(idir))&
+                   /w(ixOmin1:ixOmax1,ixOmax2+nghostcells:ixOmax2+1:-1,rho_)
+      end do
+      ! fixed b1 b2 b3 = B0 values
+      if(B0field) then
+        ! no pertubration to B-field in ghost cells
+        w(ixO^S,mag(:))=0.d0
+      else
+        ! Or set ghost cell values to specialset_B0
+        call specialset_B0(ixI^L,ixO^L,x,Bf)
+        w(ixO^S,mag(1:ndir))=Bf(ixO^S,1:ndir)
+      endif
+      ! rho and gas pressure equal to initial condition values
+      do ix2=ixOmin2,ixOmax2
+        w(ixOmin1:ixOmax1,ix2,rho_)=rbc(ix2)
+        w(ixOmin1:ixOmax1,ix2,p_)=pbc(ix2)
+      enddo
+      call mhd_to_conserved(ixI^L,ixO^L,w,x)
+    case(4)
+      ! Case 4: Coronal Boundary
+      ! Switch to primitive (rho, v, pressure, temp etc, mag) in ghost and internal cells
+      ! ixA ununsed
+      ixA^L=ixO^L;
+      ixAmin2=ixOmin2-2;ixAmax2=ixOmin2-1;
+      call mhd_to_primitive(ixI^L,ixA^L,w,x)
+      call mhd_to_primitive(ixI^L,ixO^L,w,x)
+      ! Kinetic temp= gas pressure/rho
+      Te(ixO^S)=w(ixO^S,p_)/w(ixO^S,rho_)
+   
+      ! magnetic field
+      ! manually set as anitsymmetric in x (to impose field aligned heat flux perp to boundary)
+      w(ixOmin2^%2ixO^S,mag(1))=-w(ixOmin2-1^%2ixO^S,mag(1))
+      w(ixOmin2+1^%2ixO^S,mag(1))=-w(ixOmin2-2^%2ixO^S,mag(1))
+      ! manually set as symmetric in y/z direction
+      w(ixOmin2^%2ixO^S,mag(2))=w(ixOmin2-1^%2ixO^S,mag(2))
+      w(ixOmin2+1^%2ixO^S,mag(2))=w(ixOmin2-2^%2ixO^S,mag(2))
+      w(ixOmin2^%2ixO^S,mag(3))=w(ixOmin2-1^%2ixO^S,mag(3))
+      w(ixOmin2+1^%2ixO^S,mag(3))=w(ixOmin2-2^%2ixO^S,mag(3))
+
+      ! momentum
+      ! manually set to be constant, equal to final value inside the domain
+      do ix2=ixOmin2,ixOmax2
+        w(ix2^%2ixO^S,mom(1))=w(ixOmin2-1^%2ixO^S,mom(1))
+        w(ix2^%2ixO^S,mom(2))=w(ixOmin2-1^%2ixO^S,mom(2))
+        w(ix2^%2ixO^S,mom(3))=w(ixOmin2-1^%2ixO^S,mom(3))
+      enddo
+
+      ! pressure and density
+      ! pressure change is zero if final internal Temp in column is <5MK
+      ! else the pressure is thresholded back down to zero in 2 ghost cells
+      ! 
+      do ix1=ixOmin1,ixOmax1
+        dpdh=0.d0
+        Tu=w(ix1,ixOmin2-1,p_)/w(ix1,ixOmin2-1,rho_)
+        if (Tu>5.d0) then
+          dpdh=-w(ix1,ixOmin2-1,p_)/2.d0
+        endif
+        do ix2=ixOmin2,ixOmax2
+          dh=x(ix1,ix2,2)-x(ix1,ix2-1,2)
+          dp=dpdh*dh
+          w(ix1,ix2,rho_)=w(ix1,ix2-1,rho_)
+          w(ix1,ix2,p_)=w(ix1,ix2-1,p_)+dp
+        enddo
+      enddo
+
+      ! switch back to conserved variables: rho, mom, e, mag
+      call mhd_to_conserved(ixI^L,ixA^L,w,x)
+      call mhd_to_conserved(ixI^L,ixO^L,w,x)
+    case default
+      call mpistop("Special boundary is not defined for this region")
+    end select
+
+!    write(*,*) "end   specialbound_usr",mype
+  end subroutine specialbound_usr
+
+
   subroutine p_for_errest(ixI^L,ixO^L,iflag,w,x,var)
     ! Purpose:
     !   Call pressure calc, store in "var", flag if negative values
@@ -682,6 +1152,87 @@ contains
     call mhd_get_pthermal(w,x,ixI^L,ixO^L,var)
     
   end subroutine p_for_errest
+
+
+  subroutine special_refine_grid(igrid,level,ixI^L,ixO^L,qt,w,x,refine,coarsen)
+    ! Purpose:
+    !   Enforce additional refinement or coarsening
+    !     iprob is a user defined switch from the parameter input file.
+    !     iprob=1 option: old option used for testing refinement setups. Ignore.
+    !     
+    !     iprob>=2 option: 
+    !         If in the bottom 3Mm at the base of the model
+    !             And grid refinement is less than the max refinement level,
+    !             then increase ref level and dont let it coarsen
+    !         If it is already at the max level,
+    !             dont allow refining or coarsening.
+    !         If not in the bottom 3Mm, then only allow coarsening?!
+    !         call "get_refine_region" (which identifies the flare area) to define rfgrid
+    !             anything in that get refined too
+    ! Parameter list
+    !   igrid: main program gives -grid number and current refinement level to inspect
+    !   level: main program gives grid number and -current refinement level to inspect
+    !   ixi^l: Limits (min max) of inner cell indices (no ghost cells)
+    !   ixo^l: Limits (min max) of outer cell indices (inc ghost cells)
+    !   qt:    Experiment time
+    !   w:     Variable values
+    !   x:     Cell coords
+    ! Calls:
+    !   | -> special_refine_grid
+    !        | -> get_refine_region
+    ! Called from:
+    !   Main code (Substitute for "usr_refine_grid")
+    use mod_global_parameters
+
+    integer, intent(in) :: igrid, level, ixI^L, ixO^L
+    double precision, intent(in) :: qt, w(ixI^S,1:nw), x(ixI^S,1:ndim)
+    integer, intent(inout) :: refine, coarsen
+    logical :: rfgrid
+
+!    write(*,*) "begin special_refine_grid",mype
+    ! fix the bottom layer to the 4 level
+    if (iprob==1) then
+      if (any(x(ixO^S,2)<=xprobmin2+0.3d0)) then
+        if (level<4) then
+          refine=1
+          coarsen=-1
+        else
+          refine=-1
+          coarsen=-1
+        endif
+      else
+        refine=-1
+        coarsen=1
+      endif
+    endif
+
+    if (iprob>=2) then
+!      if ( any( x(ixO^S,2)<=xprobmin2+0.3d0 ) .OR. &
+!      any( abs(x(ixO^S,1))>=(xprobmax1-(xprobmax1-xprobmin1)/float(domain_nx1)) ) ) then
+      if ( any( x(ixO^S,2)<=xprobmin2+0.3d0 ) ) then
+        if (level<refine_max_level) then
+          refine=1
+          coarsen=-1
+        else
+          refine=-1
+          coarsen=-1
+        endif
+      else
+        refine=-1
+        coarsen=1
+      endif
+
+      call get_refine_region(ixI^L,ixO^L,w,x,rfgrid)
+      if (rfgrid) then
+        refine=1
+        coarsen=-1
+      endif
+
+    endif
+
+!    write(*,*) "end   special_refine_grid",mype
+  end subroutine special_refine_grid
+
 
   subroutine get_refine_region(ixI^L,ixO^L,w,x,rfgrid)
     ! Purpose:
@@ -751,6 +1302,7 @@ contains
 
 !    write(*,*) "begin end_refine_region",mype
   end subroutine get_refine_region
+
 
   subroutine special_global(iit,qt)
     ! Purpose:
@@ -959,8 +1511,8 @@ contains
     character(len=std_len) :: fieldtype, tcondit
 
 !    write(*,*) "begin update_refine_bound",mype
-    xbRFL=-0.25d0 ! set default boundaries at +-2.5Mm
-    xbRFR=0.25d0
+    xbRFL=-0.025d0 ! set default boundaries at +-2.5Mm
+    xbRFR=0.025d0
 
     ! Trace from left side of recon region first
     ! backwards first
@@ -1537,7 +2089,7 @@ contains
       do ix2=1,numRL(ix1)
         if (abs(xF(ix^D,1))<xmin) xmin=abs(xF(ix^D,1))  ! min value of |x|
       enddo
-      if (xmin>5.0) then
+      if (xmin>0.5) then
         numValidL=numFL
         exit TRACE1
       endif
@@ -1591,7 +2143,7 @@ contains
       do ix2=1,numRR(ix1)
         if (abs(xF(ix^D,1))<xmin) xmin=abs(xF(ix^D,1))  ! min value of |x|
       enddo
-      if (xmin>5.0) then
+      if (xmin>0.5) then
         numValidR=numFL
         exit TRACE2
       endif
@@ -1843,12 +2395,11 @@ contains
     !    vs2B     vs^2 / B, V_perp^2 / B first adiabatic const? Ruan 2020 Sec 2 
     !    vp2      v_parallel^2 (in accleration region?)
     !    velocity variable names:
-    !    {v}      velocity {e/p/s /p} everything/parallel/"square" i.e. perp
+    !    {v}      velocity {e/p/s/e} everything/parallel/"square" i.e. perp
     !             {2} squared {N} new timestep
     !    eFluxb   electron fluxes at lower boundary
     ! Calls:         none
     ! Called from:   get_flare_eflux
-
     use mod_global_parameters
     use mod_usr_methods
 
@@ -2583,7 +3134,7 @@ contains
 !    write(*,*) "begin get_spectra",mype
     mec2=511.0      ! energy of a static electron [keV]
     alpha=1.0/137.0 ! fine structure constant
-    c=2.9979d10     ! light speed [cm/s ]
+    c=2.9979d10     ! light speed [cm/s]
     r0=2.8179d-13   ! radiu of electron [cm]
     keV_erg=1.0d3*const_ev  ! 1 keV = * erg
     sigma0=7.9e-25  ! [cm^2 keV]
@@ -2614,7 +3165,7 @@ contains
       enddo
     enddo
 
-    spectra=spectra*keV_erg   ! [electrons cm^-2 s ^-1 keV^-1]
+    spectra=spectra*keV_erg   ! [electrons cm^-2 s^-1 keV^-1]
 
 !    write(*,*) "end   get_spectra",mype
   end subroutine get_spectra
@@ -3188,7 +3739,6 @@ contains
 !    write(*,*) "end   get_HXR",mype
   end subroutine get_HXR
 
-
   subroutine get_mu(mugrid,ixI^L,ixO^L,qt,w,x)
     ! Purpose (written by Maxime Dubart)
     !    Calculate pitch-angle contributions on experiment grid
@@ -3248,12 +3798,11 @@ contains
 !    write(*,*) "end   get_HXR",mype
   end subroutine get_mu
 
-
   subroutine get_SXR_flare(ixI^L,ixO^L,w,x,flux,El,Eu)
     !synthesize thermal SXR from El keV to Eu keV
-    !flux (cgs): photons cm^-5 s ^-1
-    !flux (SI): photons m^-3 cm^-2 s ^-1
-    !integration of the flux is the SXR flux observed at 1AU [photons cm^-2 s ^-1]
+    !flux (cgs): photons cm^-5 s^-1
+    !flux (SI): photons m^-3 cm^-2 s^-1
+    !integration of the flux is the SXR flux observed at 1AU [photons cm^-2 s^-1]
     use mod_global_parameters
     use mod_physics
 
@@ -3271,7 +3820,7 @@ contains
     double precision :: EM(ixI^S), undercheck(ixI^S), checkval, checklevel
 
 !    write(*,*) "begin get_SXR_flare",mype
-!    I0=1.07d-42    ! photon flux index for observed at 1AU [photon cm s ^-1 keV^-1]
+!    I0=1.07d-42    ! photon flux index for observed at 1AU [photon cm s^-1 keV^-1]
     checklevel=1.0d15
     I0=1.0d0
     kb=const_kb
@@ -3281,9 +3830,8 @@ contains
     call phys_get_pthermal(w,x,ixI^L,ixO^L,pth)
     Te(ixO^S)=pth(ixO^S)/w(ixO^S,iw_rho)*unit_temperature
     if (SI_unit) then
-      Ne(ixO^S)=w(ixO^S,iw_rho)*unit_numberdensity/1.d6 ! convert meter cube to cm cube
-      
-      EM(ixO^S)=(Ne(ixO^S))**2*1.d6 ! cm cub to meter cube
+      Ne(ixO^S)=w(ixO^S,iw_rho)*unit_numberdensity/1.d6 ! m^-3 -> cm-3
+      EM(ixO^S)=(Ne(ixO^S))**2*1.d6 ! cm^-3 m^-3
     else
       Ne(ixO^S)=w(ixO^S,iw_rho)*unit_numberdensity
       EM(ixO^S)=(Ne(ixO^S))**2
@@ -3321,7 +3869,6 @@ contains
     flux(ixO^S)=flux(ixO^S)*I0
 !    write(*,*) "end   get_SXR_flare",mype
   end subroutine get_SXR_flare
-
 
   double precision function active_By(xActive,Bmax)
   ! Purpose 
@@ -3459,7 +4006,7 @@ contains
           enddo
         enddo
       endif
-      kcont=1.d0*Bmax**2
+      kcont=1.01d0*Bmax**2
       wB0(ixO^S,3)=dsqrt(kcont-wB0(ixO^S,2)**2)
     endif
 
@@ -3644,17 +4191,17 @@ contains
 !    write(*,*) "begin find_minmax_values",mype
     call find_extreme_value_box()
 
-    xboundmin=-5.d-1
-    xboundmax=5.d-1
-    yboundmin=3.d0
-    yboundmax=5.d0
+    xboundmin=-5.d-2
+    xboundmax=5.d-2
+    yboundmin=3.d-1
+    yboundmax=5.d-1
     filebit="outfl"
     call find_extreme_value_rect(xboundmin,xboundmax,yboundmin,yboundmax,filebit)
 
-    xboundmin=-3.d0
-    xboundmax=3.d0
-    yboundmin=4.d-1
-    yboundmax=8.d-1
+    xboundmin=-3.d-1
+    xboundmax=3.d-1
+    yboundmin=4.d-2
+    yboundmax=8.d-2
     filebit="foot2"
     call find_extreme_value_rect(xboundmin,xboundmax,yboundmin,yboundmax,filebit)
   
@@ -3823,10 +4370,10 @@ contains
     ! select box for checking them
     xbmin=xprobmin1
     xbmax=xprobmax1
-    xboundmin=-3.d0
-    xboundmax=3.d0
-    yboundmin=0.4d0
-    yboundmax=5.d0
+    xboundmin=-3.d-1
+    xboundmax=3.d=1
+    yboundmin=0.04
+    yboundmax=5.d-1
 
     allocate(datalog(nlog))
     allocate(datalogtemp(nlog))
@@ -4044,10 +4591,10 @@ contains
     double precision :: xboundmin,xboundmax,yboundmin,yboundmax, xbmin, xbmax
 
     ! select spatial region to check the extreme values
-    xboundmin=-3.d0
-    xboundmax=3.d0
-    yboundmin=0.4d0
-    yboundmax=5.d0
+    xboundmin=-3.d-1
+    xboundmax=3.d-1
+    yboundmin=0.04
+    yboundmax=5.d-1
 
     varnote=1
     call mhd_get_pthermal(w,x,ixI^L,ixO^L,pth)
@@ -4227,5 +4774,171 @@ contains
     {enddo\}
 
   end subroutine get_w_local
+
+
+!  subroutine special_boundary_sponge(level,qt,ixI^L,ixO^L,w,x)
+    ! boundindex: array [2*ndim]
+    !             specifies which boundaries should be sponge damped 
+    !             first two entries are for lower and upper boundaries of first dimension 
+    !             3rd&4th are for second dimension lower and upper, and so on
+    !             index value: <= 0         -> no damping
+    !             index value: 0< value <1  -> craziness
+    !             index value: >= 1         -> standard exponential or higher exponential damping, e.g. 2 for exponent^2
+    ! boundsize:  array [2*ndim]
+    !             specifies sizes of sponge zones (xi_start) in you experiments length units
+    ! boundcoeff: array [2*ndim]
+    !             specifies coefficients (a) for the damping
+    !
+    ! formula     u''=u exp ( -a (xi-xi_start)/()**index )
+!    use mod_global_parameters
+!    integer, intent(in) :: ixI^L,ixO^L,level
+!    double precision, intent(in) :: qt
+!    double precision, intent(inout) :: w(ixI^S,1:nw)
+!    double precision, intent(in) :: x(ixI^S,1:ndim)
+!
+!    double precision :: damploc
+!    double precision :: boundindex(1:2*ndim),boundsize(1:2*ndim),boundcoeff(1:2*ndim)
+!    integer :: iloop, ix1, ix2, na
+!
+!    double precision :: p0(ixO^S),rho0(ixO^S)
+!    double precision :: res
+!
+!    ! Sponge parameters
+!    boundindex=[1.0d0,0.0d0,0.0d0,0.0d0]
+!    boundsize=[dble(xprobmax1-xprobmin1)/dble(block_nx1),0.0d0,0.0d0,0.0d0]
+!    boundcoeff=[1.0d-4,0.0d0,0.0d0,0.0d0]
+!    
+!    ! splits up the etot into its components so that you can call pressure or magnetic energy or temperature
+!    ! the you need to revert back to etot using mhd_to_conserved afterwards.
+!    call mhd_to_primitive(ixI^L,ixO^L,w,x)
+!
+!    {do ix^DB=ixOmin^DB,ixOmax^DB\}
+!        na=floor((x(ix^D,2)-xprobmin2+gzone)/dya+0.5d0)
+!        res=x(ix^D,2)-xprobmin2+gzone-(dble(na)-0.5d0)*dya
+!        rho0(ix^D)=ra(na)+(one-cos(dpi*res/dya))/two*(ra(na+1)-ra(na))
+!        p0(ix^D)  =pa(na)+(one-cos(dpi*res/dya))/two*(pa(na+1)-pa(na))
+!    {end do\}
+!
+!    ! xdimension min
+!    iloop=1
+!    if (boundindex(iloop) .ge. 1) then
+!      damploc=xprobmin1+boundsize(iloop)
+!      where ( x(ixO^S,1) .lt. damploc )
+!      ! Bracket tracker
+!      !  a         b ba  c         d dc e   f           g     g hi         j       ji          k     kh            l     l fe
+!!        w(ixO^S,mom(1))=w(ixO^S,mom(1))*(exp(-boundcoeff(iloop)*((damploc-x(ixO^S,1))/boundsize(iloop))**boundindex(iloop) ))
+!!        w(ixO^S,mom(2))=w(ixO^S,mom(2))*(exp(-boundcoeff(iloop)*((damploc-x(ixO^S,1))/boundsize(iloop))**boundindex(iloop) ))
+!!        w(ixO^S,mom(3))=w(ixO^S,mom(3))*(exp(-boundcoeff(iloop)*((damploc-x(ixO^S,1))/boundsize(iloop))**boundindex(iloop) ))
+!
+!!        w(ixO^S,mag(1))=w(ixO^S,mag(1))*(exp(-boundcoeff(iloop)*((damploc-x(ixO^S,1))/boundsize(iloop))**boundindex(iloop) ))
+!!        w(ixO^S,mag(2))=w(ixO^S,mag(2))*(exp(-boundcoeff(iloop)*((damploc-x(ixO^S,1))/boundsize(iloop))**boundindex(iloop) ))
+!!        w(ixO^S,mag(3))=w(ixO^S,mag(3))*(exp(-boundcoeff(iloop)*((damploc-x(ixO^S,1))/boundsize(iloop))**boundindex(iloop) ))
+!
+!        w(ixO^S,rho_)=rho0 + (w(ixO^S,rho_)-rho0) *(exp(-boundcoeff(iloop)*((damploc-x(ixO^S,1))/boundsize(iloop))**boundindex(iloop) ))
+!!        w(ixO^S,p_)=p0 + (w(ixO^S,p_)-p0) *(exp(-boundcoeff(iloop)*((damploc-x(ixO^S,1))/boundsize(iloop))**boundindex(iloop) ))
+!
+!      end where
+!    endif
+!
+!    ! xdimension max
+!    iloop=2
+!    if (boundindex(iloop) .ge. 1) then
+!      damploc=xprobmax1-boundsize(iloop)
+!      where ( x(ixO^S,1) .gt. damploc )
+!
+!      ! Bracket tracker
+!      !  a           b ba  c           d dc e   f           g     g hi j       j        i          k     kh            l     l fe
+!!        w(ixO^S,mom(1))=w(ixO^S,mom(1))*(exp(-boundcoeff(iloop)*((x(ixO^S,1)-damploc)/boundsize(iloop))**boundindex(iloop) ))
+!!        w(ixO^S,mom(2))=w(ixO^S,mom(2))*(exp(-boundcoeff(iloop)*((x(ixO^S,1)-damploc)/boundsize(iloop))**boundindex(iloop) ))
+!!        w(ixO^S,mom(3))=w(ixO^S,mom(3))*(exp(-boundcoeff(iloop)*((x(ixO^S,1)-damploc)/boundsize(iloop))**boundindex(iloop) ))
+!
+!!        w(ixO^S,mag(1))=w(ixO^S,mag(1))*(exp(-boundcoeff(iloop)*((x(ixO^S,1)-damploc)/boundsize(iloop))**boundindex(iloop) ))
+!!        w(ixO^S,mag(2))=w(ixO^S,mag(2))*(exp(-boundcoeff(iloop)*((x(ixO^S,1)-damploc)/boundsize(iloop))**boundindex(iloop) ))
+!!        w(ixO^S,mag(3))=w(ixO^S,mag(3))*(exp(-boundcoeff(iloop)*((x(ixO^S,1)-damploc)/boundsize(iloop))**boundindex(iloop) ))
+!
+!        w(ixO^S,rho_)=rho0 + (w(ixO^S,rho_)-rho0) *(exp(-boundcoeff(iloop)*((x(ixO^S,1)-damploc)/boundsize(iloop))**boundindex(iloop) ))
+!!        w(ixO^S,p_)=p0 + (w(ixO^S,p_)-p0) *(exp(-boundcoeff(iloop)*((x(ixO^S,1)-damploc)/boundsize(iloop))**boundindex(iloop) ))
+!
+!      end where
+!    endif
+!
+!    if (ndim .gt. 1) then
+!      ! ydimension min
+!      iloop=3
+!      if (boundindex(iloop) .ge. 1) then
+!        damploc=xprobmin2+boundsize(iloop)
+!        where ( x(ixO^S,2) .lt. damploc )
+!
+!        ! Bracket tracker
+!        !  a           b ba  c           d dc e   f           g     g hi         j       ji          k     kh            l     l fe
+!!          w(ixO^S,mom(1))=w(ixO^S,mom(1))*(exp(-boundcoeff(iloop)*((damploc-x(ixO^S,2))/boundsize(iloop))**boundindex(iloop) ))
+!!          w(ixO^S,mom(2))=w(ixO^S,mom(2))*(exp(-boundcoeff(iloop)*((damploc-x(ixO^S,2))/boundsize(iloop))**boundindex(iloop) ))
+!!          w(ixO^S,mom(3))=w(ixO^S,mom(3))*(exp(-boundcoeff(iloop)*((damploc-x(ixO^S,2))/boundsize(iloop))**boundindex(iloop) ))
+!
+!!          w(ixO^S,mag(1))=w(ixO^S,mag(1))*(exp(-boundcoeff(iloop)*((damploc-x(ixO^S,2))/boundsize(iloop))**boundindex(iloop) ))
+!!          w(ixO^S,mag(2))=w(ixO^S,mag(2))*(exp(-boundcoeff(iloop)*((damploc-x(ixO^S,2))/boundsize(iloop))**boundindex(iloop) ))
+!!          w(ixO^S,mag(3))=w(ixO^S,mag(3))*(exp(-boundcoeff(iloop)*((damploc-x(ixO^S,2))/boundsize(iloop))**boundindex(iloop) ))
+! 
+!          w(ixO^S,rho_)=rho0 + (w(ixO^S,rho_)-rho0) *(exp(-boundcoeff(iloop)*((damploc-x(ixO^S,2))/boundsize(iloop))**boundindex(iloop) ))
+!!          w(ixO^S,p_)=p0 + (w(ixO^S,p_)-p0) *(exp(-boundcoeff(iloop)*((damploc-x(ixO^S,2))/boundsize(iloop))**boundindex(iloop) ))
+!
+!        end where
+!      endif
+!    
+!      ! ydimension max
+!      iloop=4
+!      if (boundindex(iloop) .ge. 1) then
+!        damploc=xprobmax2-boundsize(iloop)
+!        where ( x(ixO^S,2) .gt. damploc )
+!
+!        ! Bracket tracker
+!        !  a           b ba  c           d dc e   f           g     g hi j       j        i          k     kh            l     l fe
+!!          w(ixO^S,mom(1))=w(ixO^S,mom(1))*(exp(-boundcoeff(iloop)*((x(ixO^S,2)-damploc)/boundsize(iloop))**boundindex(iloop) ))
+!!          w(ixO^S,mom(2))=w(ixO^S,mom(2))*(exp(-boundcoeff(iloop)*((x(ixO^S,2)-damploc)/boundsize(iloop))**boundindex(iloop) ))
+!!          w(ixO^S,mom(3))=w(ixO^S,mom(3))*(exp(-boundcoeff(iloop)*((x(ixO^S,2)-damploc)/boundsize(iloop))**boundindex(iloop) ))
+!
+!!          w(ixO^S,mag(1))=w(ixO^S,mag(1))*(exp(-boundcoeff(iloop)*((x(ixO^S,2)-damploc)/boundsize(iloop))**boundindex(iloop) ))
+!!          w(ixO^S,mag(2))=w(ixO^S,mag(2))*(exp(-boundcoeff(iloop)*((x(ixO^S,2)-damploc)/boundsize(iloop))**boundindex(iloop) ))
+!!          w(ixO^S,mag(3))=w(ixO^S,mag(3))*(exp(-boundcoeff(iloop)*((x(ixO^S,2)-damploc)/boundsize(iloop))**boundindex(iloop) ))
+! 
+!          w(ixO^S,rho_)=rho0 + (w(ixO^S,rho_)-rho0) *(exp(-boundcoeff(iloop)*((x(ixO^S,2)-damploc)/boundsize(iloop))**boundindex(iloop) ))
+!!          w(ixO^S,p_)=p0 + (w(ixO^S,p_)-p0) *(exp(-boundcoeff(iloop)*((x(ixO^S,2)-damploc)/boundsize(iloop))**boundindex(iloop) ))
+!
+!        end where
+!      endif
+!    endif
+!
+!!    if (ndim .gt. 2) then
+!!      ! ydimension min
+!!      iloop=5
+!!      if (boundindex(iloop) .ge. 1) then
+!!        damploc=xprobmin3+boundsize(iloop)
+!!        where ( x(ixO^S,3) .lt. damploc )
+!!        ! Bracket tracker
+!!        !  a           b ba  c           d dc e   f           g     g hi         j       ji          k     kh            l     l fe
+!!          w(ixO^S,mom(1))=w(ixO^S,mom(1))*(exp(-boundcoeff(iloop)*((damploc-x(ixO^S,3))/boundsize(iloop))**boundindex(iloop) ))
+!!          w(ixO^S,mom(2))=w(ixO^S,mom(2))*(exp(-boundcoeff(iloop)*((damploc-x(ixO^S,3))/boundsize(iloop))**boundindex(iloop) ))
+!!          w(ixO^S,mom(3))=w(ixO^S,mom(3))*(exp(-boundcoeff(iloop)*((damploc-x(ixO^S,3))/boundsize(iloop))**boundindex(iloop) ))
+!!        end where
+!!      endif
+!!   
+!!      ! ydimension max
+!!      iloop=6
+!!      if (boundindex(iloop) .ge. 1) then
+!!        damploc=xprobmax3-boundsize(iloop)
+!!        where ( x(ixO^S,3) .gt. damploc )
+!!        ! Bracket tracker
+!!        !  a           b ba  c           d dc e   f           g     g hi j       j        i          k     kh            l     l fe
+!!          w(ixO^S,mom(1))=w(ixO^S,mom(1))*(exp(-boundcoeff(iloop)*((x(ixO^S,3)-damploc)/boundsize(iloop))**boundindex(iloop) ))
+!!          w(ixO^S,mom(2))=w(ixO^S,mom(2))*(exp(-boundcoeff(iloop)*((x(ixO^S,3)-damploc)/boundsize(iloop))**boundindex(iloop) ))
+!!          w(ixO^S,mom(3))=w(ixO^S,mom(3))*(exp(-boundcoeff(iloop)*((x(ixO^S,3)-damploc)/boundsize(iloop))**boundindex(iloop) ))
+!!        end where
+!!      endif
+!!    endif
+!
+!    call mhd_to_conserved(ixI^L,ixO^L,w,x)
+!
+!  end subroutine special_boundary_sponge
+
 
 end module mod_usr
