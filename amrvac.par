@@ -1,9 +1,9 @@
 !setup.pl -d=2
  &filelist
         base_filename='Output/reconnection_35G_'
-        restart_from_file='Output/reconnection_35G_0000.dat'
-!        convert=.true.
-!        convert_type='vtuCCmpi'
+!       restart_from_file='Output/reconnection_35G_0000.dat'
+ !       convert=.true.
+        convert_type='vtuCCmpi'
 !        autoconvert=.true.
         nwauxio=19
         saveprim=.true.
@@ -15,15 +15,15 @@
  &savelist
         itsave(1,1)=1
         itsave(1,2)=1
-        dtsave_log=.01284865696087631479d0
-        dtsave_dat=.01284865696087631479d0
+        dtsave_log=1.d0
+        dtsave_dat=1.d0
  /
 !        dtsave, ever 1 sec calculated using
 !        echo "1.0 / 77.829146115812961" | bc -l
 !        0.01284865696087631479
 
  &stoplist
-        time_max=19.27298544131447d0
+        time_max=20.d0
 /
 !        !time_max example, 160s calculated (rounded up) using
 !        !echo "160.0 / 77.829146115812961" | bc -l
@@ -49,11 +49,11 @@
 
  &meshlist
         refine_criterion=3
-        refine_max_level=6
-        block_nx1=16
-        block_nx2=16
-        domain_nx1=64
-        domain_nx2=64
+        refine_max_level=2
+        block_nx1=8
+        block_nx2=8
+        domain_nx1=32
+        domain_nx2=32
         w_refine_weight(1)=0.2d0
         w_refine_weight(7)=0.4d0
         w_refine_weight(9)=0.4d0

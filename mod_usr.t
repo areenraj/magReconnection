@@ -235,7 +235,7 @@ contains
     ! define "named" routines that will be called by the main code.
     usr_set_parameters      => initglobaldata_usr
     usr_init_one_grid       => initonegrid_usr
-    !usr_special_bc          => specialbound_usr
+  ! usr_special_bc          => specialbound_usr
     usr_aux_output          => specialvar_output
     usr_add_aux_names       => specialvarnames_output 
     usr_set_B0              => specialset_B0
@@ -244,10 +244,10 @@ contains
     usr_var_for_errest      => p_for_errest
     usr_special_convert     => usrspecial_convert
     usr_process_global      => special_global
-    !usr_gravity             => gravity
+  ! usr_gravity             => gravity
     usr_source              => special_source
-    usr_refine_grid         => special_refine_grid
-!    usr_internal_bc         => special_boundary_sponge
+  !  usr_refine_grid         => special_refine_grid
+  ! usr_internal_bc         => special_boundary_sponge
     usr_set_field_w         => special_field_w
 
     call mhd_activate()
@@ -529,7 +529,7 @@ contains
     lengthFL=(xprobmax2-xprobmin2)*2.d0 ! lengthFL : max length of field-line + twice experiment size in y
     numLP=floor(lengthFL/(dFh))         ! numLP:     max number of fieldline pieces
     !numFL=numXQ1                        ! numFL:     max numb of lines tracked (array size), init: numb x steps at max ref in B-zone
-    numFL=100
+    numFL=30
 
     allocate(xFLb(numFL,ndim),xFRb(numFL,ndim))          ! xFLb, xFRb: location of field line base (left/right)
     allocate(xQ(numXQ1,numXQ2,ndim),Qe(numXQ1,numXQ2))   ! xQ, Qe : coords of field lines, energy into accel
@@ -865,8 +865,8 @@ contains
     !bQgrid=0.d0   
     {do ix^DB=ixOmin^DB,ixOmax^DB\}
       if (x(ix^D,2)>0.0) then
-        bQgrid(ix^D)=bQ0*(abs(x(ix^D,2)-0.01)/0.05)**(-2.7)
-        bQgrid(ix^D)=bQgrid(ix^D)/(exp(0.03/(x(ix^D,2)-0.0201))-1.0)
+        bQgrid(ix^D)=bQ0*(abs(x(ix^D,2)-0.1)/0.5)**(-2.7)
+        bQgrid(ix^D)=bQgrid(ix^D)/(exp(0.3/(x(ix^D,2)-0.201))-1.0)
         if (bQgrid(ix^D)<0.0) bQgrid(ix^D)=0.0
       endif
     {end do\}
@@ -1370,7 +1370,7 @@ contains
     endif
 
     !---------- special refinement---------------------------------!
-    call update_refine_bound()
+    !call update_refine_bound()
     !---------- special refinement---------------------------------!
 
     ! for converting data, reading fast electron info
