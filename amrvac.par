@@ -92,19 +92,19 @@
  /
 
  &usr_list
-        parb=33.33333333333334d0
+        parb=16.67d0
         eta0_pre=5.d-3
-        r_eta_pre=0.024d0
+        r_eta_pre=0.05d0
         h_eta_pre=0.5d0
         t_imp=1.63177943d0
         eta0_imp=3.d-2
-        r_eta_imp=0.024d0
+        r_eta_imp=0.05d0
         h_eta_imp=0.5d0
         t_acc=1.67042541d0
         alpha_acc=2.d-4
         h_eta_acc=0.5d0
         h_s_acc=0.1d0
-        v_c_acc=1.d3
+        v_c_acc=5.d-4
         eta_max_acc=2.d-1
         eta_decay_acc=.false.
         t_decay=10.2789256d0
